@@ -1,12 +1,12 @@
 use strict;
 package NetServer::ProcessTop;
-use Event 0.13;
+use Event 0.25;
 use Carp;
 use Symbol;
 use Socket;
 use base 'Event::Stats';
 use vars qw($VERSION @ISA $BasePort $Host $OurInstance);
-$VERSION = '0.92';
+$VERSION = '0.93';
 
 $BasePort = 7000;
 chop($Host = `hostname`);
@@ -65,7 +65,7 @@ sub DESTROY {
 package NetServer::ProcessTop::Client;
 use Carp;
 use vars qw(@Argv $Terminal);
-use Event qw(all_events QUEUES);
+use Event qw(all_watchers QUEUES);
 BEGIN {
     @Argv = @ARGV;
     Event::Watcher->import(qw(ACTIVE SUSPEND QUEUED RUNNING));
@@ -121,7 +121,14 @@ sub edit {
     my $e = $o->{edit};
     my $f = 'a';
     for my $k (sort keys %$e) {
-	$s .= $o->ln(sprintf("%s %-16s $e->{$k}", $f++, $k));
+	my $v = $e->{$k};
+	$v = defined $v? $v:'<undef>';
+	if (length $v > 40) {
+	    $v = substr($v,0,40) . ' ...';
+	}
+	$v =~ s/\0/^0/g;
+	$v =~ s/\n/\\n/g;
+	$s .= $o->ln(sprintf("%s %-16s %-s", $f++, $k, $v));
     }
     $s .= $o->ln();
     $s .= $o->ln("(Use Zvalue to assign value to field 'Z'.  'x' when you are done.)");
@@ -187,7 +194,7 @@ sub update {
     $s .= $tm."\n";
 
     my @load;
-    my @events = all_events();
+    my @events = all_watchers();
     my $zombies = 0;
     for (@events) { ++$zombies if (($_->{flags} & $statusMask) == 0) }
     for my $sec (15,60,60*15) {
@@ -230,7 +237,7 @@ sub update {
     $o->{page} = $maxpage if $o->{page} > $maxpage;
 
     my $page = " P$o->{page}";
-    $s .= $o->ln("  EID PRI STATE  RAN  TIME  CPU  TYPE DESCRIPTION");
+    $s .= $o->ln("  EID PRI STATE   RAN  TIME  CPU  TYPE DESCRIPTION");
     $s .= $Term->Tgoto('cm', $o->{col} - (1+length $page), $o->{start_row}-1, $o->{sock});
     $s .= $page."\n";
 
@@ -283,7 +290,7 @@ sub update {
 		       substr($type,0,length($type)>4? 4:length($type)),
 		       $e->{desc});
 #	    warn join('x', @prf)."\n";
-	    my $line = sprintf("%5d  %2d %-5s %4d %2d:%02d%5.1f%% %4s %s", @prf);
+	    my $line = sprintf("%5d  %2d %-5s %5d %2d:%02d%5.1f%% %4s %s", @prf);
 	    $s .= $o->ln($line);
 	} else {
 	    $s .= $o->ln();
@@ -342,7 +349,7 @@ sub cmd {
 	} elsif ($in =~ m/^p\s*(\d+)$/) {
 	    $o->{page} = $1;
 	} elsif ($in =~ m/^e\s*(\d+)$/) {
-	    my @got = grep { $_->{id} == $1 } Event::Loop::events();
+	    my @got = grep { $_->{id} == $1 } all_watchers();
 	    if (@got) {
 		if (exists $got[0]{topserver}) {
 		    $o->{msg} = "I'm not allowed to edit myself.  Sorry.";
