@@ -6,9 +6,10 @@ use Symbol;
 use Socket;
 use base 'Event::Stats';
 use vars qw($VERSION @ISA $BasePort $Host);
-$VERSION = '0.50';
+$VERSION = '0.90';
 
 $BasePort = 7000;
+
 chop($Host = `hostname`);
 $Host =~ s/\..*$//; #ok?
 
@@ -61,8 +62,8 @@ use builtin qw(min);
 use vars qw(@Argv $Terminal);
 BEGIN { @Argv = @ARGV }
 
-$Terminal = 'vt100';
 require Term::Cap;
+$Terminal = 'xterm';
 my $Term;
 
 sub init {
@@ -101,23 +102,37 @@ sub refresh {
     $o->{rows_per_page} = $o->{row} - $o->{start_row} - 4;
     my $b = $Term->Tputs('cl',1,$o->{sock});
 
-    $b .= $o->ln("$0 ".join(' ', @Argv)." [$$ \@ $NetServer::ProcessTop::Host]");
-    $b .= $o->ln();
-    $b .= $o->ln();
-    $b .= $o->ln("  EID PRI STATE  RAN  TIME  CPU  TYPE DESCRIPTION");
-
     $o->update(undef, $b);
 }
 
+sub edit {
+    my ($o,undef,$s) = @_;
+    $s .= $Term->Tgoto('cm', 0, 0, $o->{sock});
+    $s .= "Event Minieditor"."\n"x3;
+    my $e = $o->{edit};
+    my $f = 'a';
+    for my $k (sort keys %$e) {
+	$s .= $o->ln(sprintf("%s %-16s $e->{$k}", $f++, $k));
+    }
+    $s .= $o->ln();
+    $s .= $o->ln("(Use Zvalue to assign value to field 'Z'.  'x' when you are done.)");
+    $s .= $o->ln();
+    $s .= $o->ln($o->{msg});
+    $s .= "% ";
+
+    return $o->cancel if !defined syswrite $o->{sock}, $s, length $s;
+}
+
 sub help {
-    my ($o) = @_;
-    my $s = $Term->Tputs('cl',1,$o->{sock});
+    my ($o,undef,$s) = @_;
+    $s .= $Term->Tgoto('cm', 0, 0, $o->{sock});
     $s .= "NetServer::ProcessTop Help
 
 
   CMD      DESCRIPTION                                  
   -------- -----------------------------------------------------------
   b #how   sort by t=time, i=id, r=ran, d=desc           [$o->{by}]
+  e #id    edit event
   h        this screen
   p #page  switch to page #page                          [$o->{page}]
   r #id    resume event
@@ -141,18 +156,27 @@ sub help {
 my $statusMask = (Event::ACTIVE | Event::SUSPEND |
 		  Event::QUEUED | Event::RUNNING);
 sub update {
-    my ($o, $e, $s) = @_;
-    return if !exists $o->{io} || $o->{help};
+    my ($o, undef, $s) = @_;
+    return if !exists $o->{io};
+
+    if ($o->{screen}) {
+	my $m = $o->{screen};
+	$o->$m(undef,$s);
+	return;
+    }
 
     $s ||= '';
 
+    $s .= $Term->Tgoto('cm', 0, 0, $o->{sock});
+    $s .= $o->ln("$0 ".join(' ', @Argv)." [$$ \@ $NetServer::ProcessTop::Host]");
+
     my ($sec,$min,$hr) = localtime(time);
-    my $tm = sprintf(" %02d:%02d:%02d [%4ds]", $hr,$min,$sec,$o->{seconds});
+    my $tm = sprintf("| %02d:%02d:%02d [%4ds]", $hr,$min,$sec,$o->{seconds});
     $s .= $Term->Tgoto('cm', $o->{col} - (1+length $tm), 0, $o->{sock});
     $s .= $tm."\n";
 
     my @load;
-    my @events = $o->{stats}->events();
+    my @events = Event::Loop::events();
     my $zombies = 0;
     for (@events) { ++$zombies if (($_->{flags} & $statusMask) == 0) }
     for my $sec (15,60,60*15) {
@@ -165,23 +189,28 @@ sub update {
 #    $s .= $Term->Tgoto('cm', 0, 1, $o->{sock});
     $s .= $o->ln(sprintf("%d events (%d zombies); load averages: %.2f, %.2f, %.2f",
 			 scalar @events, $zombies, @load));
-
-    my $filter = $o->{filter};
-    @events = grep { $_->{desc} =~ /$filter/ } @events
-	if $filter;
-
-    $o->{page} = 1 if $o->{page} < 1;
-    my $maxpage = int((@events + $o->{rows_per_page})/$o->{rows_per_page}); #+idle
-    $o->{page} = $maxpage if $o->{page} > $maxpage;
-
-    my $page = " P$o->{page}";
-    $s .= $Term->Tgoto('cm', $o->{col} - (1+length $page), $o->{start_row}-1, $o->{sock});
-    $s .= $page."\n";
+    $s .= "\n";
 
     my @all = map { [$_, $_->stats($o->{seconds})]  } @events;
     push @all, [{ id => 0, flags => Event::ACTIVE,
 		  desc => 'idle', priority => Event::Loop::QUEUES()+1 },
 		$o->{stats}->idle($o->{seconds})];
+    my $total = 0;
+    for (@all) { $total += $_->[2] }
+
+    my $filter = $o->{filter};
+    @all = grep { $_->[0]{desc} =~ /$filter/ } @all
+	if $filter;
+
+    $o->{page} = 1 if $o->{page} < 1;
+    my $maxpage = int((@all + $o->{rows_per_page} - 1)/$o->{rows_per_page});
+    $o->{page} = $maxpage if $o->{page} > $maxpage;
+
+    my $page = " P$o->{page}";
+    $s .= $o->ln("  EID PRI STATE  RAN  TIME  CPU  TYPE DESCRIPTION");
+    $s .= $Term->Tgoto('cm', $o->{col} - (1+length $page), $o->{start_row}-1, $o->{sock});
+    $s .= $page."\n";
+
     if ($o->{by} eq 't') {
 	@all = sort { $b->[2] <=> $a->[2] } @all;
     } elsif ($o->{by} eq 'i') {
@@ -193,8 +222,6 @@ sub update {
     } else {
 	warn "unknown sort by '$o->{by}'";
     }
-    my $total = 0;
-    for (@all) { $total += $_->[2] }
     splice @all, 0, $o->{rows_per_page} * ($o->{page} - 1)
 	if $o->{page} > 1;
 
@@ -202,18 +229,20 @@ sub update {
 	my $st = shift @all;
 	if ($st) {
 	    my $e = $st->[0];
+	    my $type = $e->{id}==0? 'sys' : ref $e;
+	    $type =~ s/^Event:://;
 	    my $flags = $e->{flags} & $statusMask;
 	    my $fstr = do {
 		# make look pretty!
 		if ($flags == Event::ACTIVE) {
-		    'sleep'
+		    $type eq 'idle'? 'wait' : 'sleep'
 		} elsif (($flags & ~Event::ACTIVE) == Event::RUNNING) {
 		    'cpu'
 		} elsif ($flags == 0) {
-		    'zomb'
+		    $type eq 'idle'? 'sleep' : 'zomb'
 		} elsif ($flags & Event::SUSPEND) {
 		    'stop'
-		} elsif ($flags == Event::QUEUED) {
+		} elsif (($flags & ~Event::ACTIVE) == Event::QUEUED) {
 		    'queue'
 		} else {
 		    ($flags & Event::ACTIVE? 'W':'').
@@ -222,8 +251,6 @@ sub update {
 				($flags & Event::RUNNING? 'R':'')
 		}
 	    };
-	    my $type = $e->{id}==0? 'sys' : ref $e;
-	    $type =~ s/^Event:://;
 	    my @prf = ($e->{id},
 		       $e->{priority},
 		       $fstr,
@@ -250,54 +277,90 @@ sub cmd {
     my $in;
     return $o->cancel if !sysread $e->{handle}, $in, 200;
 
+    $in =~ s/\s+$//;
     $o->{msg} = '';
-    if ($o->{help}) {
-	$o->{help} = 0;
-	$in = 'c';
+
+    my $scr = $o->{screen} || '';
+    if ($scr eq 'edit') {
+	if ($in eq '') {
+	    # ignore
+	} elsif ($in eq 'x') {
+	    $o->{screen} = undef;
+	    delete $o->{edit};
+	} elsif ($in =~ m/^(\w)\s*(.+)$/) {
+	    my $f = ord(lc $1) - ord 'a';
+	    my $v = $2;
+	    my $ev = $o->{edit};
+	    my @k = sort keys %$ev;
+	    if ($f < 0 || $f >= @k) {
+		$o->{msg} = "Field '$f' is not available";
+	    } else {
+		eval { $ev->{$k[$f]} = $v }; #hope safe enough!
+		$o->{msg} = $@ if $@;
+	    }
+	} else {
+	    $o->{msg} = "'$in'?";
+	}
+    } elsif ($scr eq '') {
+	if ($in eq '') {
+	    # ignore
+	} elsif ($in eq 'h' or $in eq '?') {
+	    $o->{screen} = 'help';
+	} elsif ($in =~ m/^[xq]$/) {
+	    $o->cancel;
+	    return;
+	} elsif ($in =~ m/^by?\s+(\w+)$/) {
+	    my $by = $1;
+	    if ($by =~ m/^(t|i|r|d)$/) {
+		$o->{by} = $by;
+	    } else {
+		$o->{msg} = "Sort by '$by'?  Type 'h' for help!";
+	    }
+	} elsif ($in =~ m/^p\s*(\d+)$/) {
+	    $o->{page} = $1;
+	} elsif ($in =~ m/^e\s*(\d+)$/) {
+	    my @got = grep { $_->{id} == $1 } Event::Loop::events();
+	    if (@got) {
+		if (exists $got[0]{topserver}) {
+		    $o->{msg} = "I'm not allowed to edit myself.  Sorry.";
+		} else {
+		    $o->{edit} = $got[0];
+		    $o->{screen} = 'edit';
+		}
+	    } else {
+		$o->{msg} = "Can't find event id '$1'";
+	    }
+	} elsif ($in =~ m{ ^/ (\w*) $ }x) {
+	    $o->{filter} = $1;
+	} elsif ($in =~ m/^t\s*(\d+)$/) {
+	    my $s = $1;
+	    my $max = Event::Stats::MAXTIME;
+	    if ($s < 1 or $s > $max) {
+		$o->{msg} = "Statistics are only available for the last $max sec.";
+	    } else {
+		$o->{seconds} = $1;
+	    }
+	} elsif ($in =~ m/^(s|r)\s*(\d+)$/) {
+	    my $do = $1;
+	    my $id = $2;
+	    my $ev = (grep { $_->{id} == $id } Event::Loop::events())[0];
+	    if (!$ev) {
+		$o->{msg} = "Can't find event '$id'.";
+	    } elsif (exists $ev->{topserver}) {
+		$o->{msg} = "Can't suspend/resume part of the TopServer.";
+	    } else {
+		$do eq 's'? $ev->suspend : $ev->resume;
+	    }
+	} else {
+	    $o->{msg} = "'$in'?  Type 'h' for help!";
+	}
+    } elsif ($scr eq 'help') {
+	$o->{screen} = undef;
+	$in = '';  #refresh
+    } else {
+	warn "? $scr";
     }
 
-    $in =~ s/\s+$//;
-    if ($in eq '') {
-	# ignore
-    } elsif ($in eq 'h' or $in eq '?') {
-	$o->{help} = 1;
-	return $o->help;
-    } elsif ($in =~ m/^[xq]$/) {
-	$o->cancel;
-	return;
-    } elsif ($in =~ m/^by?\s+(\w+)$/) {
-	my $by = $1;
-	if ($by =~ m/^(t|i|r|d)$/) {
-	    $o->{by} = $by;
-	} else {
-	    $o->{msg} = "Sort by '$by'?  Type 'h' for help!";
-	}
-    } elsif ($in =~ m/^p\s*(\d+)$/) {
-	$o->{page} = $1;
-    } elsif ($in =~ m{ ^/ (\w*) $ }x) {
-	$o->{filter} = $1;
-    } elsif ($in =~ m/^t\s*(\d+)$/) {
-	my $s = $1;
-	my $max = Event::Stats::MAXTIME;
-	if ($s < 1 or $s > $max) {
-	    $o->{msg} = "Statistics are only available for the last $max sec.";
-	} else {
-	    $o->{seconds} = $1;
-	}
-    } elsif ($in =~ m/^(s|r)\s*(\d+)$/) {
-	my $do = $1;
-	my $id = $2;
-	my $ev = (grep { $_->{id} == $id } $o->{stats}->events())[0];
-	if (!$ev) {
-	    $o->{msg} = "Can't find event '$id'.";
-	} elsif (exists $ev->{topserver}) {
-	    $o->{msg} = "Can't suspend/resume part of the TopServer.";
-	} else {
-	    $do eq 's'? $ev->suspend : $ev->resume;
-	}
-    } else {
-	$o->{msg} = "'$in'?  Type 'h' for help!";
-    }
     $o->refresh;
 }
 
@@ -329,8 +392,8 @@ This module implements a server that makes it much easier to debug
 complicated event loops.
 
 All statistics collected by L<Event> are displayed in a format similar
-to the popular C<top> program.  A C<vt100> terminal is assumed. The
-server listens on port 7000+($$%1000) by default.
+to the popular (and excellent) C<top> program.  ProcessTop server
+listens on port 7000+($$%1000) by default.
 
 =head1 SCREENSHOT
 

@@ -5,7 +5,7 @@ use ExtUtils::MakeMaker;
 
 WriteMakefile(
 	      @PREFIX,
-	      PREREQ_PM => { Event => 0.10 },
+	      PREREQ_PM => { Event => '0.11' },
 	      VERSION_FROM => "./ProcessTop.pm",
 	      NAME => 'NetServer::ProcessTop',
 	     );

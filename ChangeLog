@@ -1,0 +1,10 @@
+1998-09-11  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Release 0.90.
+
+1998-09-09  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Added an event editor.
+
+	* Fixed redraw problem (hopefully) by just redrawing the whole
+ 	screen every time.

@@ -1,21 +1,21 @@
-Event::TopServer
+setup by default without any help
+  or use ... 'noinit';
+
+allow the addition of new screens via extension API
+
+process detail screen
+  exact @ARGV
+  etc..
+
+display
+  ANSIColor support?
   make columns configurable
-  sys/usr/io?
+  resize screen (& autodetect); how to do this??
 
-VERSION screen
-  show all versions of all loaded packages
-
-event inspector
-  edit events interactively
-
-ANSIColor support?
-
-resize screen (& autodetect)
-  how to do this??
-
+split into sys/usr/io?  system specific?
 
 --------------------------------------------------------------------------------
-The real top looks like this:
+The original top looks like this:
 
 
 last pid: 16977;  load averages:  0.22,  0.12,  0.11                   14:09:56
