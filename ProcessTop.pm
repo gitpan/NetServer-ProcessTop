@@ -1,12 +1,12 @@
 use strict;
 package NetServer::ProcessTop;
-use Event 0.12;
+use Event 0.13;
 use Carp;
 use Symbol;
 use Socket;
 use base 'Event::Stats';
 use vars qw($VERSION @ISA $BasePort $Host $OurInstance);
-$VERSION = '0.91';
+$VERSION = '0.92';
 
 $BasePort = 7000;
 chop($Host = `hostname`);
@@ -64,9 +64,12 @@ sub DESTROY {
 
 package NetServer::ProcessTop::Client;
 use Carp;
-use builtin qw(min);
 use vars qw(@Argv $Terminal);
-BEGIN { @Argv = @ARGV }
+use Event qw(all_events QUEUES);
+BEGIN {
+    @Argv = @ARGV;
+    Event::Watcher->import(qw(ACTIVE SUSPEND QUEUED RUNNING));
+}
 
 require Term::Cap;
 $Terminal = 'xterm';
@@ -159,8 +162,8 @@ sub help {
     return $o->cancel if !defined syswrite $o->{sock}, $s, length $s;
 }
 
-my $statusMask = (Event::ACTIVE | Event::SUSPEND |
-		  Event::QUEUED | Event::RUNNING);
+my $statusMask = (ACTIVE | SUSPEND |
+		  QUEUED | RUNNING);
 sub update {
     my ($o, undef, $s) = @_;
     return if !exists $o->{io};
@@ -184,7 +187,7 @@ sub update {
     $s .= $tm."\n";
 
     my @load;
-    my @events = Event::Loop::events();
+    my @events = all_events();
     my $zombies = 0;
     for (@events) { ++$zombies if (($_->{flags} & $statusMask) == 0) }
     for my $sec (15,60,60*15) {
@@ -196,14 +199,14 @@ sub update {
     }
 
     my @all = map { [$_, $_->stats($o->{seconds})]  } @events;
-    push @all, [{ id => 0, flags => Event::ACTIVE,
-		  desc => 'idle', priority => Event::Loop::QUEUES() },
+    push @all, [{ id => 0, flags => ACTIVE,
+		  desc => 'idle', priority => QUEUES() },
 		$o->{stats}->idle($o->{seconds})];
     my $total = 0;
     for (@all) { $total += $_->[2] }
     my $other_tm = $o->{stats}->total($o->{seconds}) - $total;
     $other_tm = 0 if $other_tm < 0;
-    push @all, [{ id => 0, flags => Event::ACTIVE,
+    push @all, [{ id => 0, flags => ACTIVE,
 		  desc => 'other processes', priority => -1 },
 		0, $other_tm];
 
@@ -254,21 +257,21 @@ sub update {
 	    my $flags = $e->{flags} & $statusMask;
 	    my $fstr = do {
 		# make look pretty!
-		if ($flags == Event::ACTIVE) {
+		if ($flags == ACTIVE) {
 		    $type eq 'idle'? 'wait' : 'sleep'
-		} elsif (($flags & ~Event::ACTIVE) == Event::RUNNING) {
+		} elsif (($flags & ~ACTIVE) == RUNNING) {
 		    'cpu'
 		} elsif ($flags == 0) {
 		    $type eq 'idle'? 'sleep' : 'zomb'
-		} elsif ($flags & Event::SUSPEND) {
+		} elsif ($flags & SUSPEND) {
 		    'stop'
-		} elsif (($flags & ~Event::ACTIVE) == Event::QUEUED) {
+		} elsif (($flags & ~ACTIVE) == QUEUED) {
 		    'queue'
 		} else {
-		    ($flags & Event::ACTIVE? 'W':'').
-			($flags & Event::SUSPEND? 'S':'').
-			    ($flags & Event::QUEUED? 'Q':'').
-				($flags & Event::RUNNING? 'R':'')
+		    ($flags & ACTIVE? 'W':'').
+			($flags & SUSPEND? 'S':'').
+			    ($flags & QUEUED? 'Q':'').
+				($flags & RUNNING? 'R':'')
 		}
 	    };
 	    my @prf = ($e->{id},
@@ -277,7 +280,7 @@ sub update {
 		       $st->[1],
 		       int($st->[2]/60), $st->[2] % 60,
 		       $total? 100 * $st->[2]/$total : 0,
-		       substr($type,0,min(length $type, 4)),
+		       substr($type,0,length($type)>4? 4:length($type)),
 		       $e->{desc});
 #	    warn join('x', @prf)."\n";
 	    my $line = sprintf("%5d  %2d %-5s %4d %2d:%02d%5.1f%% %4s %s", @prf);
@@ -427,10 +430,10 @@ or L<poll>.)
 =item * other processes
 
 Attempts to estimate the process's non-idle time that the operating
-system gave to other processes. (Actual clock time minus the combined
-total time spent in idle and in running event handlers.)  This stat is
-an underestimate (lower bound) since the process can also be
-preemptively interrupted I<during> event processing.
+system instead gave to other processes. (Actual clock time minus the
+combined total time spent in idle and in running event handlers.)
+This stat is an underestimate (lower bound) since the process can also
+be preemptively interrupted I<during> event processing.
 
 =item * lag
 
@@ -465,6 +468,11 @@ improvements, don't be shy!
    11   4 sleep    0  0:00  0.0%   io NetServer::ProcessTop::Client localhost  
     8   4 sleep    0  0:00  0.0%   io SSL                                      
    13   4 zomb     0  0:00  0.0% time QSGTable                                 
+
+=head1 BUGS
+
+The potential impact of multiple CPUs and kernel-level thread support
+is ignored.
 
 =head1 SUPPORT
 

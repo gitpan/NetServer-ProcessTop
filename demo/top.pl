@@ -1,7 +1,7 @@
 #!./perl -w
 
 use strict;
-use Event 0.10;
+use Event 0.13 qw(loop);
 require NetServer::ProcessTop;
 
 for (1..40) { 
@@ -12,4 +12,4 @@ for (1..40) {
 my $top = NetServer::ProcessTop->new();
 warn "Listening on port $top->{port}...\n";
 
-Event::Loop::Loop();
+loop();

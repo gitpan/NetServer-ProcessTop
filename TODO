@@ -1,17 +1,16 @@
 allow the addition of new screens via extension API
 
-highlight select events
-
 process detail screen
   exact @ARGV
   etc..
 
 display
   ANSIColor support?
+    highlight select events
   make columns configurable
   resize screen (& autodetect); how to do this??
 
-split into sys/usr/io?  system specific?
+investigate getrusage!
 
 --------------------------------------------------------------------------------
 The original top looks like this:
