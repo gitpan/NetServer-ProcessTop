@@ -1,12 +1,12 @@
 use strict;
 package NetServer::ProcessTop;
-use Event 0.33;
+use Event 0.38;
 use Carp;
 use Symbol;
 use Socket;
 use Event::Stats 0.5;
 use vars qw($VERSION @ISA $BasePort $Host $OurInstance);
-$VERSION = '0.96';
+$VERSION = '1.00';
 
 $BasePort = 7000;
 chop($Host = `hostname`);
@@ -43,7 +43,7 @@ sub new {
 sub new_client {
     my ($o, $e) = @_;
     my $sock = gensym;
-    my $paddr = accept $sock, $e->{e_fd};
+    my $paddr = accept $sock, $e->w->{e_fd};
     my ($port,$iaddr) = sockaddr_in($paddr);
     (bless {
 	    stats => $o,
@@ -307,7 +307,7 @@ sub update {
 sub cmd {
     my ($o, $e) = @_;
     my $in;
-    return $o->cancel if !sysread $e->{e_fd}, $in, 200;
+    return $o->cancel if !sysread $e->w->{e_fd}, $in, 200;
 
     $in =~ s/\s+$//;
     $o->{msg} = '';
