@@ -1,3 +1,23 @@
+1999-03-30  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Release 0.96.
+
+1999-03-27  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Stats are no longer collected when nobody is watching.
+
+	* Sync with Event::Stats 0.5.
+
+1999-01-12  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Release 0.95.
+
+	* Update for Event-Stats.
+
+1998-12-25  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Update for Event 0.27.
+
 1998-11-20  Joshua Pritikin  <joshua.pritikin@db.com>
 
 	* Release 0.93.

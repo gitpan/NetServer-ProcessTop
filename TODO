@@ -1,3 +1,5 @@
+show 'die' stat in bold
+
 idle events are not display right (probably)
 
 allow the addition of new screens via extension API

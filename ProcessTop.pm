@@ -1,12 +1,12 @@
 use strict;
 package NetServer::ProcessTop;
-use Event 0.25;
+use Event 0.33;
 use Carp;
 use Symbol;
 use Socket;
-use base 'Event::Stats';
+use Event::Stats 0.5;
 use vars qw($VERSION @ISA $BasePort $Host $OurInstance);
-$VERSION = '0.93';
+$VERSION = '0.96';
 
 $BasePort = 7000;
 chop($Host = `hostname`);
@@ -33,18 +33,17 @@ sub new {
     listen($sock, SOMAXCONN);
 
     my $o = bless { port => $port }, $class;
-    $o->{io} = Event->io(handle => $sock, events => 'r',
-			 callback => [$o, 'new_client'],
-			 desc => "NetServer::ProcessTop");
+    $o->{io} = Event->io(e_fd => $sock, e_poll => 'r',
+			 e_cb => [$o, 'new_client'],
+			 e_desc => "NetServer::ProcessTop");
     $o->{io}{topserver} = 1;
-    $o->restart();
     $o;
 }
 
 sub new_client {
     my ($o, $e) = @_;
     my $sock = gensym;
-    my $paddr = accept $sock, $e->{handle};
+    my $paddr = accept $sock, $e->{e_fd};
     my ($port,$iaddr) = sockaddr_in($paddr);
     (bless {
 	    stats => $o,
@@ -57,7 +56,7 @@ sub new_client {
 sub DESTROY {
     my ($o) = @_;
 #    warn "$o->DESTROY";
-    close $o->{io}{handle};
+    close $o->{io}{e_fd};
     (delete $o->{io})->cancel; #has circular ref
     bless $o, $ISA[0];
 }
@@ -66,9 +65,10 @@ package NetServer::ProcessTop::Client;
 use Carp;
 use vars qw(@Argv $Terminal);
 use Event qw(all_watchers QUEUES);
+use Event::Watcher qw(ACTIVE SUSPEND QUEUED RUNNING);
+use Event::Stats qw(round_seconds idle_time total_time);
 BEGIN {
     @Argv = @ARGV;
-    Event::Watcher->import(qw(ACTIVE SUSPEND QUEUED RUNNING));
 }
 
 require Term::Cap;
@@ -76,6 +76,7 @@ $Terminal = 'xterm';
 my $Term;
 
 sub init {
+    Event::Stats::collect(1);
     $Term ||= Term::Cap->Tgetent({ TERM => $Terminal, OSPEED => 9600 });
     my ($o) = @_;
     my $sock = $o->{sock};
@@ -84,12 +85,12 @@ sub init {
     $o->{filter} = '';
     $o->{by} = 't';
     $o->{msg} = '';
-    $o->{seconds} = Event::Stats::round_seconds(15);
-    $o->{io} = Event->io(handle => $sock, events => 'r',
-			 callback => [$o, 'cmd'],
-			 desc => ref($o)." $o->{from}");
-    $o->{timer} = Event->timer(interval => 4, callback => [$o,'update'],
-			       desc => ref($o)." $o->{from}");
+    $o->{seconds} = round_seconds(60);
+    $o->{io} = Event->io(e_fd => $sock, e_poll => 'r',
+			 e_cb => [$o, 'cmd'],
+			 e_desc => ref($o)." $o->{from}");
+    $o->{timer} = Event->timer(e_interval => 4, e_cb => [$o,'update'],
+			       e_desc => ref($o)." $o->{from}");
     for (@$o{'io','timer'}) { $_->{topserver} = 1 }
     $o->refresh();
 }
@@ -196,34 +197,35 @@ sub update {
     my @load;
     my @events = all_watchers();
     my $zombies = 0;
-    for (@events) { ++$zombies if (($_->{flags} & $statusMask) == 0) }
+    for (@events) { ++$zombies if (($_->{e_flags} & $statusMask) == 0) }
     for my $sec (15,60,60*15) {
 	my $busy = 0;
-	for (@events) { $busy += ($_->stats($sec))[1] }
-	my $idle = ($o->{stats}->idle($sec))[1];
+	for (@events) { $busy += ($_->stats($sec))[2] }
+	my $idle = (idle_time($sec))[2];
 	my $tm = $idle + $busy;
 	push @load, $tm? $busy / $tm : 0;
     }
 
     my @all = map { [$_, $_->stats($o->{seconds})]  } @events;
-    push @all, [{ id => 0, flags => ACTIVE,
-		  desc => 'idle', priority => QUEUES() },
-		$o->{stats}->idle($o->{seconds})];
+    push @all, [{ e_id => 0, e_flags => ACTIVE,
+		  e_desc => 'idle', e_prio => QUEUES() },
+		idle_time($o->{seconds})];
     my $total = 0;
-    for (@all) { $total += $_->[2] }
-    my $other_tm = $o->{stats}->total($o->{seconds}) - $total;
+    for (@all) { $total += $_->[3] }
+    my $other_tm = total_time($o->{seconds}) - $total;
     $other_tm = 0 if $other_tm < 0;
-    push @all, [{ id => 0, flags => ACTIVE,
-		  desc => 'other processes', priority => -1 },
-		0, $other_tm];
+    push @all, [{ e_id => 0, e_flags => ACTIVE,
+		  e_desc => 'other processes', e_prio => -1 },
+		0, 0, $other_tm];
 
     # $lag should not be affected by other processes
     my $lag = $total - $o->{seconds};
     $lag = 0 if $lag < 0;
 
 #    $s .= $Term->Tgoto('cm', 0, 1, $o->{sock});
-    $s .= $o->ln(sprintf("%d events (%d zombies); load averages: %.2f, %.2f, %.2f; lag %2d%%",
-			 scalar @events, $zombies, @load, $total? 100*$lag/$total : 0));
+    $s .= $o->ln(sprintf("%d events (%d zombie%s); load averages: %.2f, %.2f, %.2f; lag %2d%%",
+			 scalar @events, $zombies, $zombies==1?'':'s',
+			 @load, $total? 100*$lag/$total : 0));
     $s .= "\n";
 
     $total += $other_tm; # add in other processes for %time [XXX optional?]
@@ -237,18 +239,18 @@ sub update {
     $o->{page} = $maxpage if $o->{page} > $maxpage;
 
     my $page = " P$o->{page}";
-    $s .= $o->ln("  EID PRI STATE   RAN  TIME  CPU  TYPE DESCRIPTION");
+    $s .= $o->ln("  EID PRI STATE   RAN  TIME   CPU TYPE DESCRIPTION");
     $s .= $Term->Tgoto('cm', $o->{col} - (1+length $page), $o->{start_row}-1, $o->{sock});
     $s .= $page."\n";
 
     if ($o->{by} eq 't') {
-	@all = sort { $b->[2] <=> $a->[2] } @all;
+	@all = sort { $b->[3] <=> $a->[3] } @all;
     } elsif ($o->{by} eq 'i') {
-	@all = sort { $a->[0]{id} <=> $b->[0]{id} } @all;
+	@all = sort { $a->[0]{e_id} <=> $b->[0]{e_id} } @all;
     } elsif ($o->{by} eq 'r') {
 	@all = sort { $b->[1] <=> $a->[1] } @all;
     } elsif ($o->{by} eq 'd') {
-	@all = sort { $a->[0]{desc} cmp $b->[0]{desc} } @all;
+	@all = sort { $a->[0]{e_desc} cmp $b->[0]{e_desc} } @all;
     } else {
 	warn "unknown sort by '$o->{by}'";
     }
@@ -259,9 +261,9 @@ sub update {
 	my $st = shift @all;
 	if ($st) {
 	    my $e = $st->[0];
-	    my $type = $e->{id}==0? 'sys' : ref $e;
+	    my $type = $e->{e_id}==0? 'sys' : ref $e;
 	    $type =~ s/^Event:://;
-	    my $flags = $e->{flags} & $statusMask;
+	    my $flags = $e->{e_flags} & $statusMask;
 	    my $fstr = do {
 		# make look pretty!
 		if ($flags == ACTIVE) {
@@ -281,14 +283,14 @@ sub update {
 				($flags & RUNNING? 'R':'')
 		}
 	    };
-	    my @prf = ($e->{id},
-		       $e->{priority},
+	    my @prf = ($e->{e_id},
+		       $e->{e_prio},
 		       $fstr,
 		       $st->[1],
-		       int($st->[2]/60), $st->[2] % 60,
-		       $total? 100 * $st->[2]/$total : 0,
+		       int($st->[3]/60), $st->[3] % 60,
+		       $total? 100 * $st->[3]/$total : 0,
 		       substr($type,0,length($type)>4? 4:length($type)),
-		       $e->{desc});
+		       $e->{e_desc});
 #	    warn join('x', @prf)."\n";
 	    my $line = sprintf("%5d  %2d %-5s %5d %2d:%02d%5.1f%% %4s %s", @prf);
 	    $s .= $o->ln($line);
@@ -305,7 +307,7 @@ sub update {
 sub cmd {
     my ($o, $e) = @_;
     my $in;
-    return $o->cancel if !sysread $e->{handle}, $in, 200;
+    return $o->cancel if !sysread $e->{e_fd}, $in, 200;
 
     $in =~ s/\s+$//;
     $o->{msg} = '';
@@ -349,7 +351,7 @@ sub cmd {
 	} elsif ($in =~ m/^p\s*(\d+)$/) {
 	    $o->{page} = $1;
 	} elsif ($in =~ m/^e\s*(\d+)$/) {
-	    my @got = grep { $_->{id} == $1 } all_watchers();
+	    my @got = grep { $_->{e_id} == $1 } all_watchers();
 	    if (@got) {
 		if (exists $got[0]{topserver}) {
 		    $o->{msg} = "I'm not allowed to edit myself.  Sorry.";
@@ -364,16 +366,16 @@ sub cmd {
 	    $o->{filter} = $1;
 	} elsif ($in =~ m/^t\s*(\d+)$/) {
 	    my $s = $1;
-	    my $max = Event::Stats::MAXTIME;
+	    my $max = &Event::Stats::MAXTIME;
 	    if ($s < 0) {
 		$o->{msg} = "Sorry, past performance is not an indication of future performance.";
 	    } else {
-		$o->{seconds} =	Event::Stats::round_seconds($1);
+		$o->{seconds} =	round_seconds($1);
 	    }
 	} elsif ($in =~ m/^(s|r)\s*(\d+)$/) {
 	    my $do = $1;
 	    my $id = $2;
-	    my $ev = (grep { $_->{id} == $id } Event::Loop::events())[0];
+	    my $ev = (grep { $_->{e_id} == $id } all_watchers())[0];
 	    if (!$ev) {
 		$o->{msg} = "Can't find event '$id'.";
 	    } elsif (exists $ev->{topserver}) {
@@ -399,6 +401,7 @@ sub cancel {
 #    warn "$o->cancel\n";
     close $o->{sock};
     map { $_->cancel } delete @$o{'io','timer'};
+    Event::Stats::collect(-1);
 }
 
 1;
@@ -491,7 +494,7 @@ majordomo@perl.org.
 
 =head1 COPYRIGHT
 
-Copyright © 1998 Joshua Nathaniel Pritikin.  All rights reserved.
+Copyright © 1998-1999 Joshua Nathaniel Pritikin.  All rights reserved.
 This program is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself.
 
