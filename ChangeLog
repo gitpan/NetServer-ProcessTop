@@ -1,3 +1,10 @@
+1998-09-16  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Explain how to interpret statistics.
+	
+	* Round the measurement interval to the nearest available
+ 	statistics interval.
+
 1998-09-11  Joshua Pritikin  <joshua.pritikin@db.com>
 
 	* Release 0.90.

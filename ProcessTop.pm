@@ -1,17 +1,23 @@
 use strict;
 package NetServer::ProcessTop;
-use Event 0.10;
+use Event 0.12;
 use Carp;
 use Symbol;
 use Socket;
 use base 'Event::Stats';
-use vars qw($VERSION @ISA $BasePort $Host);
-$VERSION = '0.90';
+use vars qw($VERSION @ISA $BasePort $Host $OurInstance);
+$VERSION = '0.91';
 
 $BasePort = 7000;
-
 chop($Host = `hostname`);
-$Host =~ s/\..*$//; #ok?
+
+sub import {
+    eval {
+	$OurInstance = NetServer::ProcessTop->new();
+#	warn "Listening on ".(7000+($$%1000))."\n";
+    };
+    if ($@) { warn; return }
+}
 
 sub new {
     my ($class, $port) = @_;
@@ -75,7 +81,7 @@ sub init {
     $o->{filter} = '';
     $o->{by} = 't';
     $o->{msg} = '';
-    $o->{seconds} = 15;
+    $o->{seconds} = Event::Stats::round_seconds(15);
     $o->{io} = Event->io(handle => $sock, events => 'r',
 			 callback => [$o, 'cmd'],
 			 desc => ref($o)." $o->{from}");
@@ -168,7 +174,9 @@ sub update {
     $s ||= '';
 
     $s .= $Term->Tgoto('cm', 0, 0, $o->{sock});
-    $s .= $o->ln("$0 ".join(' ', @Argv)." [$$ \@ $NetServer::ProcessTop::Host]");
+    my $name = $0;
+    $name =~ s,^.*/,,;
+    $s .= $o->ln("$name PID=$$ \@ $NetServer::ProcessTop::Host");
 
     my ($sec,$min,$hr) = localtime(time);
     my $tm = sprintf("| %02d:%02d:%02d [%4ds]", $hr,$min,$sec,$o->{seconds});
@@ -186,17 +194,29 @@ sub update {
 	my $tm = $idle + $busy;
 	push @load, $tm? $busy / $tm : 0;
     }
-#    $s .= $Term->Tgoto('cm', 0, 1, $o->{sock});
-    $s .= $o->ln(sprintf("%d events (%d zombies); load averages: %.2f, %.2f, %.2f",
-			 scalar @events, $zombies, @load));
-    $s .= "\n";
 
     my @all = map { [$_, $_->stats($o->{seconds})]  } @events;
     push @all, [{ id => 0, flags => Event::ACTIVE,
-		  desc => 'idle', priority => Event::Loop::QUEUES()+1 },
+		  desc => 'idle', priority => Event::Loop::QUEUES() },
 		$o->{stats}->idle($o->{seconds})];
     my $total = 0;
     for (@all) { $total += $_->[2] }
+    my $other_tm = $o->{stats}->total($o->{seconds}) - $total;
+    $other_tm = 0 if $other_tm < 0;
+    push @all, [{ id => 0, flags => Event::ACTIVE,
+		  desc => 'other processes', priority => -1 },
+		0, $other_tm];
+
+    # $lag should not be affected by other processes
+    my $lag = $total - $o->{seconds};
+    $lag = 0 if $lag < 0;
+
+#    $s .= $Term->Tgoto('cm', 0, 1, $o->{sock});
+    $s .= $o->ln(sprintf("%d events (%d zombies); load averages: %.2f, %.2f, %.2f; lag %2d%%",
+			 scalar @events, $zombies, @load, $total? 100*$lag/$total : 0));
+    $s .= "\n";
+
+    $total += $other_tm; # add in other processes for %time [XXX optional?]
 
     my $filter = $o->{filter};
     @all = grep { $_->[0]{desc} =~ /$filter/ } @all
@@ -335,10 +355,10 @@ sub cmd {
 	} elsif ($in =~ m/^t\s*(\d+)$/) {
 	    my $s = $1;
 	    my $max = Event::Stats::MAXTIME;
-	    if ($s < 1 or $s > $max) {
-		$o->{msg} = "Statistics are only available for the last $max sec.";
+	    if ($s < 0) {
+		$o->{msg} = "Sorry, past performance is not an indication of future performance.";
 	    } else {
-		$o->{seconds} = $1;
+		$o->{seconds} =	Event::Stats::round_seconds($1);
 	    }
 	} elsif ($in =~ m/^(s|r)\s*(\d+)$/) {
 	    my $do = $1;
@@ -381,19 +401,47 @@ NetServer::ProcessTop - Make event loop statistics easily available
 
 =head1 SYNOPSIS
 
-  require NetServer::ProcessTop;
+  use NetServer::ProcessTop;
 
-  my $TopServer = NetServer::ProcessTop->new();
   warn "NetServer::ProcessTop listening on port ".(7000+($$ % 1000))."\n";
 
 =head1 DESCRIPTION
 
-This module implements a server that makes it much easier to debug
-complicated event loops.
+This module implements a C<top>-like server that makes it easier to
+debug complicated event loops.
 
 All statistics collected by L<Event> are displayed in a format similar
 to the popular (and excellent) C<top> program.  ProcessTop server
 listens on port 7000+($$%1000) by default.
+
+=head1 PRECISE STAT DEFINITIONS
+
+=over 4
+
+=item * idle
+
+Idle tracks the amount of time that the process cooperatively
+reliquished control to the operating system.  (Usually via L<select>
+or L<poll>.)
+
+=item * other processes
+
+Attempts to estimate the process's non-idle time that the operating
+system gave to other processes. (Actual clock time minus the combined
+total time spent in idle and in running event handlers.)  This stat is
+an underestimate (lower bound) since the process can also be
+preemptively interrupted I<during> event processing.
+
+=item * lag
+
+Lag is the percent over the I<planned amount of time> that the event
+loop took to complete.  ((Actual time - planned time) / planned time)
+
+=back
+
+It is unfortunately that more intuitive stats are not available.
+Benchmarking is a slippery business.  If you have ideas for
+improvements, don't be shy!
 
 =head1 SCREENSHOT
 

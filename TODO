@@ -1,7 +1,6 @@
-setup by default without any help
-  or use ... 'noinit';
-
 allow the addition of new screens via extension API
+
+highlight select events
 
 process detail screen
   exact @ARGV
