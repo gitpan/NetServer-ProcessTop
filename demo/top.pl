@@ -1,7 +1,16 @@
 #!./perl -w
+#!./perl -wT
 
+BEGIN { 
+    # untaint
+    @INC = map { $_ =~ /^(.*)$/; $1 } @INC;
+    require Config;
+    push @INC, (map { $_, "$_/$Config::Config{archname}" }
+		split /:+/, $ENV{PERL5LIB});
+    @INC = map { $_ =~ /^(.*)$/; $1 } @INC;
+}
 use strict;
-use Event 0.27 qw(loop);
+use Event qw(loop);
 require NetServer::ProcessTop;
 
 for (1..40) { 

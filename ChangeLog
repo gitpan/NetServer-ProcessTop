@@ -1,3 +1,23 @@
+2000-01-28  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Release 1.02.
+
+	* Manually change the height & width of screen with the 'z'
+ 	command.
+
+2000-01-26  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Sort by priority; unrestrict filter REx; update
+	docs (suggested by Jochen.Stenzel.gp@icn.siemens.de).
+
+1999-08-13  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Make minor changes for Time::Warp.
+
+1999-07-22  Joshua Pritikin  <joshua.pritikin@db.com>
+
+	* Optionally support eval $arbitrary_perl_code from the user.
+
 1999-06-19  Joshua Pritikin  <joshua.pritikin@db.com>
 
 	* Update for Event 0.42.

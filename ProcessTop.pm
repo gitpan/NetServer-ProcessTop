@@ -1,16 +1,17 @@
 use strict;
 package NetServer::ProcessTop;
-use Event 0.38;
+use Event 0.38 qw(time);
 use Carp;
 use Symbol;
 use Socket;
+use Sys::Hostname;
 use Event::Stats 0.5;
 use constant NICE => -1;
 use vars qw($VERSION @ISA $BasePort $Host $OurInstance);
-$VERSION = '1.01';
+$VERSION = '1.02';
 
 $BasePort = 7000;
-chop($Host = `hostname`);
+$Host = eval { hostname } || 'somewhere';
 
 sub import {
     eval {
@@ -48,7 +49,6 @@ sub new_client {
     my ($port,$iaddr) = sockaddr_in($paddr);
     (bless {
 	    stats => $o,
-	    mod => time,
 	    from => gethostbyaddr($iaddr, AF_INET) || inet_ntoa($iaddr),
 	    sock => $sock,
 	   }, ref($o).'::Client')->init;
@@ -65,7 +65,7 @@ sub DESTROY {
 package NetServer::ProcessTop::Client;
 use Carp;
 use vars qw(@Argv $Terminal $NextID);
-use Event qw(all_watchers QUEUES);
+use Event qw(all_watchers QUEUES time);
 use Event::Watcher qw(ACTIVE SUSPEND QUEUED RUNNING);
 use Event::Stats qw(round_seconds idle_time total_time);
 use constant NICE => -1;
@@ -94,6 +94,7 @@ sub init {
 			 cb => [$o, 'cmd'],
 			 desc => ref($o)." $o->{from}");
     $o->{io}{topserver} = 1;
+    @$o{'col', 'row'} = (80,24);
     $o->refresh();
 }
 
@@ -110,7 +111,6 @@ sub ln {
 sub refresh {
     my ($o) = @_;
 
-    @$o{'col', 'row'} = (80,24); #XXX can get dynamically? how?!
     $o->{rows_per_page} = $o->{row} - $o->{start_row} - 4;
     my $b = $Term->Tputs('cl',1,$o->{sock});
 
@@ -150,18 +150,18 @@ sub help {
 
   CMD      DESCRIPTION                                  
   -------- -----------------------------------------------------------
+  ! <code> eval arbitrary perl code
   d #      set Event::DebugLevel                         [$Event::DebugLevel]
   e #id    edit event
   h        this screen
-  o #how   order by t=time, i=id, r=ran, d=desc          [$o->{by}]
+  o #how   order by t=time, i=id, r=ran, d=desc, p=prio  [$o->{by}]
   p #page  switch to page #page                          [$o->{page}]
   r #id    resume event
   s #id    suspend event
   t #sec   show stats for the last #sec seconds          [$o->{seconds}]
   x        exit
+  z r,c    size screen to (rows, columns)                [$o->{row}, $o->{col}]
   /regexp  show events with matching descriptions        [$o->{filter}]
-
-
 
 
 
@@ -232,7 +232,7 @@ sub update {
 
     my $filter = $o->{filter};
     @all = grep { $_->[0]{desc} =~ /$filter/ } @all
-	if $filter;
+	if length $filter;
 
     $o->{page} = 1 if $o->{page} < 1;
     my $maxpage = int((@all + $o->{rows_per_page} - 1)/$o->{rows_per_page});
@@ -251,6 +251,8 @@ sub update {
 	@all = sort { $b->[1] <=> $a->[1] } @all;
     } elsif ($o->{by} eq 'd') {
 	@all = sort { $a->[0]{desc} cmp $b->[0]{desc} } @all;
+    } elsif ($o->{by} eq 'p') {
+	@all = sort { $a->[0]{prio} cmp $b->[0]{prio} } @all;
     } else {
 	warn "unknown sort by '$o->{by}'";
     }
@@ -354,13 +356,13 @@ sub cmd {
 	    return;
 	} elsif ($in =~ m/^o\s*(\w+)$/) {
 	    my $by = $1;
-	    if ($by =~ m/^(t|i|r|d)$/) {
+	    if ($by =~ m/^(t|i|r|d|p)$/) {
 		$o->{by} = $by;
 	    } else {
 		$o->{msg} = "Sort by '$by'?  Type 'h' for help!";
 	    }
 	} elsif ($in =~ m/^p\s*(\d+)$/) {
-	    $o->{page} = $1;
+	    $o->{page} = $1 || 1;
 	} elsif ($in =~ m/^e\s*(\d+)$/) {
 	    my @got = grep { $_->{id} == $1 } all_watchers();
 	    if (@got) {
@@ -373,8 +375,14 @@ sub cmd {
 	    } else {
 		$o->{msg} = "Can't find event id '$1'";
 	    }
-	} elsif ($in =~ m{ ^/ (\w*) $ }x) {
+	} elsif ($in =~ m{ ^/ (.*) $ }x) {
 	    $o->{filter} = $1;
+	} elsif ($in =~ m/^z\s*(\d+)(\s*,\s*|\s+)(\d+)$/) {
+	    my ($r,$c) = ($1,$3);
+	    $r = 12 if $r < 12;
+	    $c = 70 if $c < 70;
+	    $o->{row} = $r;
+	    $o->{col} = $c;
 	} elsif ($in =~ m/^t\s*(\d+)$/) {
 	    my $s = $1;
 	    my $max = &Event::Stats::MAXTIME;
@@ -394,6 +402,11 @@ sub cmd {
 	    } else {
 		$ev->suspend($do eq 's')
 	    }
+	} elsif ($in =~ s/^\!//) {
+	    my $v;
+	    $v = eval $in;
+	    $v = '<undef>' if !defined $v;
+	    $o->{msg} = $@? $@ : $v;
 	} else {
 	    $o->{msg} = "'$in'?  Type 'h' for help!";
 	}
@@ -425,8 +438,9 @@ NetServer::ProcessTop - Make event loop statistics easily available
 
 =head1 SYNOPSIS
 
-  use NetServer::ProcessTop;
+  require NetServer::ProcessTop;
 
+  'NetServer::ProcessTop'->import();  # creates server
   warn "NetServer::ProcessTop listening on port ".(7000+($$ % 1000))."\n";
 
 =head1 DESCRIPTION
@@ -489,6 +503,13 @@ improvements, don't be shy!
    11   4 sleep    0  0:00  0.0%   io NetServer::ProcessTop::Client localhost  
     8   4 sleep    0  0:00  0.0%   io SSL                                      
    13   4 zomb     0  0:00  0.0% time QSGTable                                 
+
+The three load averages are for the most recent 15 seconds, 1 minute,
+and 15 minutes, respectively.
+
+For efficiency, not all time intervals are available.  When you change
+the time interval, it will be rounded to the closest for which there
+is data.
 
 =head1 BUGS
 

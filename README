@@ -4,6 +4,3 @@ This module sets up a mini-server accessible via telnet that shows
 what a process's event loop is doing.  The output is formatted in a
 manner similar to the popular 'top' program.  Event priorities and
 other parameters can be adjusted interactively.
-
-
-Requires Event 0.27.
