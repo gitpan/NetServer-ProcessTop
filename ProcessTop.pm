@@ -5,8 +5,9 @@ use Carp;
 use Symbol;
 use Socket;
 use Event::Stats 0.5;
+use constant NICE => -1;
 use vars qw($VERSION @ISA $BasePort $Host $OurInstance);
-$VERSION = '1.00';
+$VERSION = '1.01';
 
 $BasePort = 7000;
 chop($Host = `hostname`);
@@ -33,9 +34,9 @@ sub new {
     listen($sock, SOMAXCONN);
 
     my $o = bless { port => $port }, $class;
-    $o->{io} = Event->io(e_fd => $sock, e_poll => 'r',
-			 e_cb => [$o, 'new_client'],
-			 e_desc => "NetServer::ProcessTop");
+    $o->{io} = Event->io(fd => $sock, poll => 'r', nice => NICE,
+			 cb => [$o, 'new_client'],
+			 desc => "NetServer::ProcessTop");
     $o->{io}{topserver} = 1;
     $o;
 }
@@ -43,7 +44,7 @@ sub new {
 sub new_client {
     my ($o, $e) = @_;
     my $sock = gensym;
-    my $paddr = accept $sock, $e->w->{e_fd};
+    my $paddr = accept $sock, $e->w->fd or die "accept: $!";
     my ($port,$iaddr) = sockaddr_in($paddr);
     (bless {
 	    stats => $o,
@@ -56,20 +57,22 @@ sub new_client {
 sub DESTROY {
     my ($o) = @_;
 #    warn "$o->DESTROY";
-    close $o->{io}{e_fd};
+    close $o->{io}->fd;
     (delete $o->{io})->cancel; #has circular ref
     bless $o, $ISA[0];
 }
 
 package NetServer::ProcessTop::Client;
 use Carp;
-use vars qw(@Argv $Terminal);
+use vars qw(@Argv $Terminal $NextID);
 use Event qw(all_watchers QUEUES);
 use Event::Watcher qw(ACTIVE SUSPEND QUEUED RUNNING);
 use Event::Stats qw(round_seconds idle_time total_time);
+use constant NICE => -1;
 BEGIN {
     @Argv = @ARGV;
 }
+$NextID=1;
 
 require Term::Cap;
 $Terminal = 'xterm';
@@ -86,12 +89,11 @@ sub init {
     $o->{by} = 't';
     $o->{msg} = '';
     $o->{seconds} = round_seconds(60);
-    $o->{io} = Event->io(e_fd => $sock, e_poll => 'r',
-			 e_cb => [$o, 'cmd'],
-			 e_desc => ref($o)." $o->{from}");
-    $o->{timer} = Event->timer(e_interval => 4, e_cb => [$o,'update'],
-			       e_desc => ref($o)." $o->{from}");
-    for (@$o{'io','timer'}) { $_->{topserver} = 1 }
+    $o->{io} = Event->io(fd => $sock, poll => 'r', nice => NICE,
+			 timeout => 4,
+			 cb => [$o, 'cmd'],
+			 desc => ref($o)." $o->{from}");
+    $o->{io}{topserver} = 1;
     $o->refresh();
 }
 
@@ -121,8 +123,8 @@ sub edit {
     $s .= "Event Minieditor"."\n"x3;
     my $e = $o->{edit};
     my $f = 'a';
-    for my $k (sort keys %$e) {
-	my $v = $e->{$k};
+    for my $k ($e->attributes) {
+	my $v = $e->$k();
 	$v = defined $v? $v:'<undef>';
 	if (length $v > 40) {
 	    $v = substr($v,0,40) . ' ...';
@@ -148,9 +150,10 @@ sub help {
 
   CMD      DESCRIPTION                                  
   -------- -----------------------------------------------------------
-  b #how   sort by t=time, i=id, r=ran, d=desc           [$o->{by}]
+  d #      set Event::DebugLevel                         [$Event::DebugLevel]
   e #id    edit event
   h        this screen
+  o #how   order by t=time, i=id, r=ran, d=desc          [$o->{by}]
   p #page  switch to page #page                          [$o->{page}]
   r #id    resume event
   s #id    suspend event
@@ -170,8 +173,6 @@ sub help {
     return $o->cancel if !defined syswrite $o->{sock}, $s, length $s;
 }
 
-my $statusMask = (ACTIVE | SUSPEND |
-		  QUEUED | RUNNING);
 sub update {
     my ($o, undef, $s) = @_;
     return if !exists $o->{io};
@@ -196,8 +197,6 @@ sub update {
 
     my @load;
     my @events = all_watchers();
-    my $zombies = 0;
-    for (@events) { ++$zombies if (($_->{e_flags} & $statusMask) == 0) }
     for my $sec (15,60,60*15) {
 	my $busy = 0;
 	for (@events) { $busy += ($_->stats($sec))[2] }
@@ -206,16 +205,18 @@ sub update {
 	push @load, $tm? $busy / $tm : 0;
     }
 
-    my @all = map { [$_, $_->stats($o->{seconds})]  } @events;
-    push @all, [{ e_id => 0, e_flags => ACTIVE,
-		  e_desc => 'idle', e_prio => QUEUES() },
+    my @all = map {
+	$_->{id} ||= $NextID++;
+	[{ obj => $_, id =>$_->{id}, desc => $_->desc, prio => $_->prio },
+	 $_->stats($o->{seconds})]
+    } @events;
+    push @all, [{ id => 0, desc => 'idle', prio => QUEUES },
 		idle_time($o->{seconds})];
     my $total = 0;
     for (@all) { $total += $_->[3] }
     my $other_tm = total_time($o->{seconds}) - $total;
     $other_tm = 0 if $other_tm < 0;
-    push @all, [{ e_id => 0, e_flags => ACTIVE,
-		  e_desc => 'other processes', e_prio => -1 },
+    push @all, [{ id => 0, desc => 'other processes', prio => -1 },
 		0, 0, $other_tm];
 
     # $lag should not be affected by other processes
@@ -223,9 +224,8 @@ sub update {
     $lag = 0 if $lag < 0;
 
 #    $s .= $Term->Tgoto('cm', 0, 1, $o->{sock});
-    $s .= $o->ln(sprintf("%d events (%d zombie%s); load averages: %.2f, %.2f, %.2f; lag %2d%%",
-			 scalar @events, $zombies, $zombies==1?'':'s',
-			 @load, $total? 100*$lag/$total : 0));
+    $s .= $o->ln(sprintf("%d events; load averages: %.2f, %.2f, %.2f; lag %2d%%",
+			 scalar @events, @load, $total? 100*$lag/$total : 0));
     $s .= "\n";
 
     $total += $other_tm; # add in other processes for %time [XXX optional?]
@@ -246,11 +246,11 @@ sub update {
     if ($o->{by} eq 't') {
 	@all = sort { $b->[3] <=> $a->[3] } @all;
     } elsif ($o->{by} eq 'i') {
-	@all = sort { $a->[0]{e_id} <=> $b->[0]{e_id} } @all;
+	@all = sort { $a->[0]{id} <=> $b->[0]{id} } @all;
     } elsif ($o->{by} eq 'r') {
 	@all = sort { $b->[1] <=> $a->[1] } @all;
     } elsif ($o->{by} eq 'd') {
-	@all = sort { $a->[0]{e_desc} cmp $b->[0]{e_desc} } @all;
+	@all = sort { $a->[0]{desc} cmp $b->[0]{desc} } @all;
     } else {
 	warn "unknown sort by '$o->{by}'";
     }
@@ -260,37 +260,39 @@ sub update {
     for (my $r = 0; $r < $o->{rows_per_page}; $r++) {
 	my $st = shift @all;
 	if ($st) {
-	    my $e = $st->[0];
-	    my $type = $e->{e_id}==0? 'sys' : ref $e;
-	    $type =~ s/^Event:://;
-	    my $flags = $e->{e_flags} & $statusMask;
-	    my $fstr = do {
-		# make look pretty!
-		if ($flags == ACTIVE) {
-		    $type eq 'idle'? 'wait' : 'sleep'
-		} elsif (($flags & ~ACTIVE) == RUNNING) {
-		    'cpu'
-		} elsif ($flags == 0) {
-		    $type eq 'idle'? 'sleep' : 'zomb'
-		} elsif ($flags & SUSPEND) {
-		    'stop'
-		} elsif (($flags & ~ACTIVE) == QUEUED) {
-		    'queue'
-		} else {
-		    ($flags & ACTIVE? 'W':'').
-			($flags & SUSPEND? 'S':'').
-			    ($flags & QUEUED? 'Q':'').
-				($flags & RUNNING? 'R':'')
-		}
-	    };
-	    my @prf = ($e->{e_id},
-		       $e->{e_prio},
+	    my $e = $st->[0]{obj};
+	    my ($type, $fstr);
+	    if (!$e) {
+		$type = 'sys';
+		$fstr = '';
+	    } else {
+		$type = ref $e;
+		$type =~ s/^Event:://;
+		$fstr = do {
+		    # make look pretty!
+		    if ($e->is_suspended) {
+			'S'.(($e->is_active? 'W':'').
+			     ($e->is_queued?'Q':'').
+			     ($e->is_running?'R':''))
+		    } elsif ($e->is_running) {
+			'cpu'
+		    } elsif ($e->is_queued) {
+			'queue'
+		    } elsif ($e->is_active) {
+			$type eq 'idle'? 'wait' : 'sleep'
+		    } else {
+			$type eq 'idle'? 'sleep' : 'zomb'
+		    }
+		};
+	    }
+	    my @prf = ($st->[0]{id},
+		       $st->[0]{prio},
 		       $fstr,
 		       $st->[1],
 		       int($st->[3]/60), $st->[3] % 60,
 		       $total? 100 * $st->[3]/$total : 0,
 		       substr($type,0,length($type)>4? 4:length($type)),
-		       $e->{e_desc});
+		       $st->[0]{desc});
 #	    warn join('x', @prf)."\n";
 	    my $line = sprintf("%5d  %2d %-5s %5d %2d:%02d%5.1f%% %4s %s", @prf);
 	    $s .= $o->ln($line);
@@ -306,8 +308,12 @@ sub update {
 
 sub cmd {
     my ($o, $e) = @_;
+    if ($e->got eq 't') {
+	$o->update;
+	return;
+    }
     my $in;
-    return $o->cancel if !sysread $e->w->{e_fd}, $in, 200;
+    return $o->cancel if !sysread $e->w->fd, $in, 200;
 
     $in =~ s/\s+$//;
     $o->{msg} = '';
@@ -323,11 +329,14 @@ sub cmd {
 	    my $f = ord(lc $1) - ord 'a';
 	    my $v = $2;
 	    my $ev = $o->{edit};
-	    my @k = sort keys %$ev;
+	    my @k = $ev->attributes;
 	    if ($f < 0 || $f >= @k) {
 		$o->{msg} = "Field '$f' is not available";
 	    } else {
-		eval { $ev->{$k[$f]} = $v }; #hope safe enough!
+		eval {
+		    my $m = $k[$f];
+		    $ev->$m($v)
+		}; #hope safe enough!
 		$o->{msg} = $@ if $@;
 	    }
 	} else {
@@ -338,10 +347,12 @@ sub cmd {
 	    # ignore
 	} elsif ($in eq 'h' or $in eq '?') {
 	    $o->{screen} = 'help';
+	} elsif ($in =~ m/^d\s*(\d+)$/) {
+	    $Event::DebugLevel = int $1;
 	} elsif ($in =~ m/^[xq]$/) {
 	    $o->cancel;
 	    return;
-	} elsif ($in =~ m/^by?\s+(\w+)$/) {
+	} elsif ($in =~ m/^o\s*(\w+)$/) {
 	    my $by = $1;
 	    if ($by =~ m/^(t|i|r|d)$/) {
 		$o->{by} = $by;
@@ -351,7 +362,7 @@ sub cmd {
 	} elsif ($in =~ m/^p\s*(\d+)$/) {
 	    $o->{page} = $1;
 	} elsif ($in =~ m/^e\s*(\d+)$/) {
-	    my @got = grep { $_->{e_id} == $1 } all_watchers();
+	    my @got = grep { $_->{id} == $1 } all_watchers();
 	    if (@got) {
 		if (exists $got[0]{topserver}) {
 		    $o->{msg} = "I'm not allowed to edit myself.  Sorry.";
@@ -375,13 +386,13 @@ sub cmd {
 	} elsif ($in =~ m/^(s|r)\s*(\d+)$/) {
 	    my $do = $1;
 	    my $id = $2;
-	    my $ev = (grep { $_->{e_id} == $id } all_watchers())[0];
+	    my $ev = (grep { $_->{id} == $id } all_watchers())[0];
 	    if (!$ev) {
 		$o->{msg} = "Can't find event '$id'.";
 	    } elsif (exists $ev->{topserver}) {
 		$o->{msg} = "Can't suspend/resume part of the TopServer.";
 	    } else {
-		$do eq 's'? $ev->suspend : $ev->resume;
+		$ev->suspend($do eq 's')
 	    }
 	} else {
 	    $o->{msg} = "'$in'?  Type 'h' for help!";
@@ -400,7 +411,7 @@ sub cancel {
     my ($o) = @_;
 #    warn "$o->cancel\n";
     close $o->{sock};
-    map { $_->cancel } delete @$o{'io','timer'};
+    $o->{io}->cancel;
     Event::Stats::collect(-1);
 }
 

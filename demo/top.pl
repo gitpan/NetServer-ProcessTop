@@ -6,7 +6,7 @@ require NetServer::ProcessTop;
 
 for (1..40) { 
     my $i = 1 + rand;
-    Event->timer(e_interval => $i, e_cb => sub {}, e_desc => sprintf("%.2f",$i));
+    Event->timer(interval => $i, cb => sub {}, desc => sprintf("%.2f",$i));
 }
 
 my $top = NetServer::ProcessTop->new();
